@@ -8,8 +8,48 @@ from .auth.router import router as auth_router
 from .datasets.router import router as datasets_router
 from .analytics.router import router as analytics_router
 from .chat.router import router as chat_router
+from .databases.router import router as databases_router
 
 log = logging.getLogger(__name__)
+
+
+def _migrate_dataset_owners() -> None:
+    """Add owner_username column if missing and assign orphaned rows to admin."""
+    try:
+        from .database import get_client
+        from .config import get_settings
+        from datetime import datetime, timezone
+
+        client = get_client()
+        s = get_settings()
+
+        client.command(
+            "ALTER TABLE databrief.datasets ADD COLUMN IF NOT EXISTS owner_username String DEFAULT ''"
+        )
+
+        orphans = list(client.query(
+            "SELECT * FROM databrief.datasets FINAL WHERE owner_username = '' AND status != 'deleted'"
+        ).named_results())
+
+        for row in orphans:
+            client.insert(
+                "databrief.datasets",
+                [[
+                    row["dataset_id"], row["name"], row["original_filename"], row["file_type"],
+                    row["status"], row["row_count"], row["column_count"], row["clickhouse_table"],
+                    row["cleaning_log"], row["column_schema"], row["quality_score"],
+                    row["error_message"], row["created_at"], datetime.now(timezone.utc), s.app_user,
+                ]],
+                column_names=[
+                    "dataset_id", "name", "original_filename", "file_type", "status",
+                    "row_count", "column_count", "clickhouse_table",
+                    "cleaning_log", "column_schema", "quality_score", "error_message",
+                    "created_at", "updated_at", "owner_username",
+                ],
+            )
+            log.info("Assigned dataset %s to user '%s'", row["dataset_id"], s.app_user)
+    except Exception as exc:
+        log.warning("Owner migration skipped: %s", exc)
 
 
 def _recover_stuck_datasets() -> None:
@@ -50,6 +90,7 @@ def _recover_stuck_datasets() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _migrate_dataset_owners()
     _recover_stuck_datasets()
     yield
 
@@ -68,6 +109,7 @@ app.include_router(auth_router)
 app.include_router(datasets_router)
 app.include_router(analytics_router)
 app.include_router(chat_router)
+app.include_router(databases_router)
 
 
 @app.get("/health")

@@ -32,8 +32,8 @@ _MAX_ROWS_LIMIT = 500
 # ---------------------------------------------------------------------------
 
 @router.get("/kpis")
-def dataset_kpis(dataset_id: str, _: Auth):
-    _require_ready(dataset_id)
+def dataset_kpis(dataset_id: str, username: Auth):
+    _require_ready(dataset_id, username)
     cache_key = f"kpis:{dataset_id}"
     cached = query_cache.get(cache_key)
     if cached is not None:
@@ -48,8 +48,8 @@ def dataset_kpis(dataset_id: str, _: Auth):
 # ---------------------------------------------------------------------------
 
 @router.get("/summary")
-def dataset_summary(dataset_id: str, _: Auth):
-    ds = _require_ready(dataset_id)
+def dataset_summary(dataset_id: str, username: Auth):
+    ds = _require_ready(dataset_id, username)
     cache_key = f"summary:{dataset_id}"
     cached = query_cache.get(cache_key)
     if cached is not None:
@@ -94,12 +94,12 @@ def dataset_summary(dataset_id: str, _: Auth):
 @router.get("/timeseries")
 def dataset_timeseries(
     dataset_id: str,
-    _: Auth,
+    username: Auth,
     dt_col: str = Query(..., description="Datetime column to group by"),
     metric: str = Query("count", description="'count' or a numeric column name"),
     interval: str = Query("month", description="month | week | day"),
 ):
-    ds = _require_ready(dataset_id)
+    ds = _require_ready(dataset_id, username)
     table = ds["clickhouse_table"]
     schema = json.loads(ds.get("column_schema") or "[]")
     col_names = {c["name"] for c in schema}
@@ -145,12 +145,12 @@ def dataset_timeseries(
 @router.get("/breakdown")
 def dataset_breakdown(
     dataset_id: str,
-    _: Auth,
+    username: Auth,
     col: str = Query(..., description="Column to group by"),
     metric: str = Query("count", description="'count' or a numeric column name for avg"),
     limit: int = Query(10, ge=1, le=_MAX_BREAKDOWN_LIMIT),
 ):
-    ds = _require_ready(dataset_id)
+    ds = _require_ready(dataset_id, username)
     table = ds["clickhouse_table"]
     schema = json.loads(ds.get("column_schema") or "[]")
     col_names = {c["name"] for c in schema}
@@ -188,11 +188,11 @@ def dataset_breakdown(
 @router.get("/histogram")
 def dataset_histogram(
     dataset_id: str,
-    _: Auth,
+    username: Auth,
     col: str = Query(..., description="Numeric column"),
     bins: int = Query(20, ge=2, le=100),
 ):
-    ds = _require_ready(dataset_id)
+    ds = _require_ready(dataset_id, username)
     table = ds["clickhouse_table"]
 
     cache_key = f"hist:{dataset_id}:{col}:{bins}"
@@ -241,20 +241,62 @@ def dataset_histogram(
 
 
 # ---------------------------------------------------------------------------
+# Correlation matrix (numeric columns)
+# ---------------------------------------------------------------------------
+
+_MAX_CORR_COLS = 10
+
+
+@router.get("/correlation")
+def dataset_correlation(dataset_id: str, username: Auth):
+    ds = _require_ready(dataset_id, username)
+    table = ds["clickhouse_table"]
+    schema = json.loads(ds.get("column_schema") or "[]")
+    num_cols = [c["name"] for c in schema if c.get("type") in ("Float64", "Int64")][:_MAX_CORR_COLS]
+
+    if len(num_cols) < 2:
+        raise HTTPException(status_code=400, detail="Dataset needs at least 2 numeric columns for correlation")
+
+    cache_key = f"corr:{dataset_id}"
+    cached = query_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Build one-pass query: corr(a, b) for every pair including diagonal
+    exprs = ", ".join(
+        f"corr(assumeNotNull(`{a}`), assumeNotNull(`{b}`)) AS c_{i}_{j}"
+        for i, a in enumerate(num_cols)
+        for j, b in enumerate(num_cols)
+    )
+    result = get_client().query(f"SELECT {exprs} FROM databrief.`{table}`")
+    row = list(result.named_results())[0] if result else {}
+
+    n = len(num_cols)
+    matrix = [
+        [round(float(row.get(f"c_{i}_{j}", 0) or 0), 4) for j in range(n)]
+        for i in range(n)
+    ]
+
+    response = {"columns": num_cols, "matrix": matrix}
+    query_cache.set(cache_key, response)
+    return response
+
+
+# ---------------------------------------------------------------------------
 # Paginated rows (with optional single-column filter)
 # ---------------------------------------------------------------------------
 
 @router.get("/rows")
 def dataset_rows(
     dataset_id: str,
-    _: Auth,
+    username: Auth,
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=_MAX_ROWS_LIMIT),
     filter_col: str | None = Query(None),
     filter_op: str | None = Query(None, description="eq | gt | lt | gte | lte | contains"),
     filter_val: str | None = Query(None),
 ):
-    ds = _require_ready(dataset_id)
+    ds = _require_ready(dataset_id, username)
     table = ds["clickhouse_table"]
     offset = (page - 1) * limit
 
@@ -279,11 +321,11 @@ def dataset_rows(
 # ---------------------------------------------------------------------------
 
 @router.get("/report", response_class=HTMLResponse)
-def dataset_report(dataset_id: str, _: Auth):
+def dataset_report(dataset_id: str, username: Auth):
     """Generate a self-contained HTML report for download."""
     from ..chat.agents import run_writer
 
-    ds = _require_ready(dataset_id)
+    ds = _require_ready(dataset_id, username)
     client = get_client()
     kpis = get_kpis(client, dataset_id)
     schema = json.loads(ds.get("column_schema") or "[]")
@@ -449,10 +491,12 @@ def _render_report_html(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _require_ready(dataset_id: str) -> dict:
+def _require_ready(dataset_id: str, username: str) -> dict:
     ds = get_dataset(get_client(), dataset_id)
     if ds is None or ds["status"] == "deleted":
         raise HTTPException(status_code=404, detail="Dataset not found")
+    if ds.get("owner_username", "") != username:
+        raise HTTPException(status_code=403, detail="Access denied")
     if ds["status"] != "ready":
         raise HTTPException(status_code=409, detail=f"Dataset not ready (status: {ds['status']})")
     return ds

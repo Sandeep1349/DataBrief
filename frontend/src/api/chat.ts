@@ -12,6 +12,12 @@ export const getThread = (id: string) =>
 export const deleteThread = (id: string) =>
   api.delete<void>(`/chat/threads/${id}`);
 
+export const renameThread = (id: string, title: string) =>
+  api.patch<Thread>(`/chat/threads/${id}`, { title });
+
+export const getRecentDatasetIds = () =>
+  api.get<string[]>("/chat/recent-datasets");
+
 export const listMessages = (threadId: string) =>
   api.get<Message[]>(`/chat/threads/${threadId}/messages`);
 

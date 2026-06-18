@@ -245,6 +245,45 @@ def run_writer(dataset_name: str, kpis: list[dict], analyst_result: dict | None 
 
 
 # ---------------------------------------------------------------------------
+# Thread title generation
+# ---------------------------------------------------------------------------
+
+def generate_thread_title(user_message: str, assistant_response: str) -> str:
+    """Generate a short descriptive title for a thread from the first exchange."""
+    s = get_settings()
+    if not s.groq_api_key:
+        return user_message[:60]
+    try:
+        groq_client = Groq(api_key=s.groq_api_key)
+        resp = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate a short, descriptive title (4–6 words) for a data analysis "
+                        "conversation based on the user's question and the assistant's answer. "
+                        "Return ONLY the title text, no quotes or trailing punctuation."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"User asked: {user_message[:300]}\n\n"
+                        f"Assistant answered: {assistant_response[:300]}"
+                    ),
+                },
+            ],
+            max_tokens=20,
+            temperature=0.3,
+        )
+        title = resp.choices[0].message.content.strip().strip('"').strip("'")
+        return title[:80] if title else user_message[:60]
+    except Exception:
+        return user_message[:60]
+
+
+# ---------------------------------------------------------------------------
 # Chat agent — streams SSE with chain-of-thought thinking events
 # ---------------------------------------------------------------------------
 
@@ -274,7 +313,7 @@ def stream_chat_response(
     kpi_text = "\n".join(f"• {k['name']}: {k['value']}" for k in kpis)
 
     system = (
-        "You are DataBrief, an AI data analyst. Answer questions about the loaded dataset(s).\n\n"
+        "You are Shiro, an AI data analyst. Answer questions about the loaded dataset(s).\n\n"
         f"Available datasets:\n{schema_text or 'No datasets loaded yet'}\n\n"
         f"Known KPIs (pre-computed):\n{kpi_text or 'No KPIs available'}\n\n"
         "Rules:\n"

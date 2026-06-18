@@ -3,12 +3,13 @@ export interface Dataset {
   name: string;
   original_filename: string;
   file_type: string;
-  status: "pending" | "processing" | "ready" | "failed" | "deleted";
+  status: "pending" | "queued" | "processing" | "ready" | "failed" | "deleted" | "cleaning";
   row_count: number;
   column_count: number;
   quality_score: number;
   clickhouse_table: string;
   column_schema: string;
+  cleaning_log: string;
   created_at: string;
 }
 
@@ -70,4 +71,14 @@ export interface ColumnSchema {
   name: string;
   type: string;
   nullable: boolean;
+}
+
+export interface CleanRule {
+  type: string;
+  column: string;
+  find_value?: string;
+  replace_value?: string;
+  operator?: string;
+  value?: string;
+  fill_value?: string;
 }

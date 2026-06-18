@@ -16,6 +16,7 @@ def insert_dataset_version(
     file_type: str,
     status: str,
     clickhouse_table: str,
+    owner_username: str = "",
     row_count: int = 0,
     column_count: int = 0,
     cleaning_log: str = "[]",
@@ -31,13 +32,13 @@ def insert_dataset_version(
             dataset_id, name, original_filename, file_type, status,
             row_count, column_count, clickhouse_table,
             cleaning_log, column_schema, quality_score, error_message,
-            created_at or now, now,
+            created_at or now, now, owner_username,
         ]],
         column_names=[
             "dataset_id", "name", "original_filename", "file_type", "status",
             "row_count", "column_count", "clickhouse_table",
             "cleaning_log", "column_schema", "quality_score", "error_message",
-            "created_at", "updated_at",
+            "created_at", "updated_at", "owner_username",
         ],
     )
 
@@ -60,6 +61,7 @@ def update_dataset_status(
         file_type=row["file_type"],
         status=status,
         clickhouse_table=row["clickhouse_table"],
+        owner_username=row.get("owner_username", ""),
         row_count=kwargs.get("row_count", row["row_count"]),
         column_count=kwargs.get("column_count", row["column_count"]),
         cleaning_log=kwargs.get("cleaning_log", row["cleaning_log"]),
@@ -87,7 +89,7 @@ def get_dataset(client, dataset_id: str) -> Optional[dict]:
             dataset_id, name, original_filename, file_type, status,
             row_count, column_count, clickhouse_table,
             cleaning_log, column_schema, quality_score, error_message,
-            created_at, updated_at
+            created_at, updated_at, owner_username
         FROM databrief.datasets FINAL
         WHERE dataset_id = {dataset_id:String}
         LIMIT 1
@@ -98,19 +100,35 @@ def get_dataset(client, dataset_id: str) -> Optional[dict]:
     return rows[0] if rows else None
 
 
-def list_datasets(client) -> list[dict]:
-    result = client.query(
-        """
-        SELECT
-            dataset_id, name, original_filename, file_type, status,
-            row_count, column_count, clickhouse_table,
-            cleaning_log, column_schema, quality_score, error_message,
-            created_at, updated_at
-        FROM databrief.datasets FINAL
-        WHERE status != 'deleted'
-        ORDER BY created_at DESC
-        """
-    )
+def list_datasets(client, owner_username: Optional[str] = None) -> list[dict]:
+    """Return datasets. If owner_username is provided, filter to that user only."""
+    if owner_username is not None:
+        result = client.query(
+            """
+            SELECT
+                dataset_id, name, original_filename, file_type, status,
+                row_count, column_count, clickhouse_table,
+                cleaning_log, column_schema, quality_score, error_message,
+                created_at, updated_at, owner_username
+            FROM databrief.datasets FINAL
+            WHERE status != 'deleted' AND owner_username = {owner:String}
+            ORDER BY created_at DESC
+            """,
+            parameters={"owner": owner_username},
+        )
+    else:
+        result = client.query(
+            """
+            SELECT
+                dataset_id, name, original_filename, file_type, status,
+                row_count, column_count, clickhouse_table,
+                cleaning_log, column_schema, quality_score, error_message,
+                created_at, updated_at, owner_username
+            FROM databrief.datasets FINAL
+            WHERE status != 'deleted'
+            ORDER BY created_at DESC
+            """
+        )
     return list(result.named_results())
 
 

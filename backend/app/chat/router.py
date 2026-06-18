@@ -16,7 +16,7 @@ from ..auth.dependencies import require_auth
 from ..analytics.kpis import get_kpis
 from ..database import get_client
 from ..datasets.queries import list_datasets, get_dataset
-from .agents import stream_chat_response, run_writer
+from .agents import stream_chat_response, run_writer, generate_thread_title
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 Auth = Annotated[str, Depends(require_auth)]
@@ -28,6 +28,10 @@ Auth = Annotated[str, Depends(require_auth)]
 
 class ThreadCreate(BaseModel):
     title: str = "New conversation"
+
+
+class ThreadUpdate(BaseModel):
+    title: str
 
 
 class MessageCreate(BaseModel):
@@ -50,6 +54,33 @@ def create_thread(body: ThreadCreate, _: Auth):
         column_names=["thread_id", "title", "created_at", "updated_at"],
     )
     return {"thread_id": thread_id, "title": body.title, "created_at": now}
+
+
+@router.get("/recent-datasets")
+def recent_datasets(_: Auth):
+    """Return IDs of up to 3 most recently used datasets across all chat messages."""
+    client = get_client()
+    result = client.query(
+        """
+        SELECT referenced_dataset_ids
+        FROM databrief.chat_messages
+        WHERE role = 'assistant'
+        ORDER BY created_at DESC
+        LIMIT 100
+        """
+    )
+    seen: list[str] = []
+    for row in result.named_results():
+        try:
+            ids = json.loads(row["referenced_dataset_ids"] or "[]")
+            for ds_id in ids:
+                if ds_id and ds_id not in seen:
+                    seen.append(ds_id)
+                if len(seen) >= 3:
+                    return seen
+        except Exception:
+            pass
+    return seen
 
 
 @router.get("/threads")
@@ -101,6 +132,26 @@ def delete_thread(thread_id: str, _: Auth):
     )
 
 
+@router.patch("/threads/{thread_id}")
+def rename_thread(thread_id: str, body: ThreadUpdate, _: Auth):
+    client = get_client()
+    result = client.query(
+        "SELECT thread_id, created_at FROM databrief.chat_threads FINAL "
+        "WHERE thread_id = {thread_id:String} AND title != '__deleted__' LIMIT 1",
+        parameters={"thread_id": thread_id},
+    )
+    rows = list(result.named_results())
+    if not rows:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    now = datetime.now(timezone.utc)
+    client.insert(
+        "databrief.chat_threads",
+        [[thread_id, body.title, rows[0]["created_at"], now]],
+        column_names=["thread_id", "title", "created_at", "updated_at"],
+    )
+    return {"thread_id": thread_id, "title": body.title}
+
+
 # ---------------------------------------------------------------------------
 # Message endpoints
 # ---------------------------------------------------------------------------
@@ -122,7 +173,7 @@ def list_messages(thread_id: str, _: Auth):
 
 
 @router.post("/threads/{thread_id}/messages")
-async def send_message(thread_id: str, body: MessageCreate, _: Auth):
+async def send_message(thread_id: str, body: MessageCreate, username: Auth):
     """Send a user message and stream the assistant response as SSE."""
     client = get_client()
 
@@ -158,8 +209,8 @@ async def send_message(thread_id: str, body: MessageCreate, _: Auth):
     # Drop the user message we just inserted (it's included in the stream call)
     history = [h for h in history if h["content"] != body.content]
 
-    # Resolve dataset scope
-    all_datasets = list_datasets(client)
+    # Resolve dataset scope (only this user's datasets)
+    all_datasets = list_datasets(client, owner_username=username)
     ready_datasets = [d for d in all_datasets if d["status"] == "ready"]
     if body.dataset_ids:
         scoped = [d for d in ready_datasets if d["dataset_id"] in body.dataset_ids]
@@ -212,6 +263,26 @@ async def send_message(thread_id: str, body: MessageCreate, _: Auth):
             except Exception:
                 pass
 
+            # Auto-generate title on the first exchange
+            if not history:
+                try:
+                    new_title = generate_thread_title(body.content, full_text)
+                    created_result = client.query(
+                        "SELECT created_at FROM databrief.chat_threads FINAL "
+                        "WHERE thread_id = {thread_id:String} LIMIT 1",
+                        parameters={"thread_id": thread_id},
+                    )
+                    created_rows = list(created_result.named_results())
+                    if created_rows:
+                        client.insert(
+                            "databrief.chat_threads",
+                            [[thread_id, new_title, created_rows[0]["created_at"],
+                              datetime.now(timezone.utc)]],
+                            column_names=["thread_id", "title", "created_at", "updated_at"],
+                        )
+                except Exception:
+                    pass
+
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
@@ -227,11 +298,15 @@ async def send_message(thread_id: str, body: MessageCreate, _: Auth):
 # ---------------------------------------------------------------------------
 
 @router.get("/datasets/{dataset_id}/insights")
-def get_insights(dataset_id: str, _: Auth):
+def get_insights(dataset_id: str, username: Auth):
     """Generate an executive summary for a dataset using the Writer agent."""
     client = get_client()
     ds = get_dataset(client, dataset_id)
-    if ds is None or ds["status"] != "ready":
+    if ds is None or ds["status"] == "deleted":
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    if ds.get("owner_username", "") != username:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if ds["status"] != "ready":
         raise HTTPException(status_code=404, detail="Dataset not found or not ready")
 
     kpis = get_kpis(client, dataset_id)

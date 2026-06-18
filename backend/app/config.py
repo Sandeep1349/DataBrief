@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
 
     max_upload_mb: int = 3072
-    sample_row_cap: int = 20000
+    sample_row_cap: int = 500000
 
     model_config = {"env_file": ".env", "case_sensitive": False, "extra": "ignore"}
 
